@@ -55,7 +55,7 @@ func NewScanner(options ...func(*Scanner)) (*Scanner, error) {
 }
 
 // Run runs nmap synchronously and returns the result of the scan.
-func (s *Scanner) Run() (result *Run, warnings []string, err error) {
+func (s *Scanner) Run() (result Run, warnings []string, err error) {
 	var stdout, stderr bytes.Buffer
 
 	// Enable XML output
@@ -72,7 +72,7 @@ func (s *Scanner) Run() (result *Run, warnings []string, err error) {
 	// Run nmap process
 	err = cmd.Start()
 	if err != nil {
-		return nil, warnings, err
+		return Run{}, warnings, err
 	}
 
 	// Make a goroutine to notify the select when the scan is done.
@@ -89,7 +89,7 @@ func (s *Scanner) Run() (result *Run, warnings []string, err error) {
 		// The process is killed and a timeout error is returned.
 		_ = cmd.Process.Kill()
 
-		return nil, warnings, ErrScanTimeout
+		return Run{}, warnings, ErrScanTimeout
 	case <-done:
 
 		// Process nmap stderr output containing none-critical errors and warnings
@@ -102,7 +102,7 @@ func (s *Scanner) Run() (result *Run, warnings []string, err error) {
 		for _, warning := range warnings {
 			switch {
 			case strings.Contains(warning, "Malloc Failed!"):
-				return nil, warnings, ErrMallocFailed
+				return Run{}, warnings, ErrMallocFailed
 			// TODO: Add cases for other known errors we might want to guard.
 			default:
 			}
@@ -113,17 +113,17 @@ func (s *Scanner) Run() (result *Run, warnings []string, err error) {
 		result, err := Parse(stdout.Bytes())
 		if err != nil {
 			warnings = append(warnings, err.Error()) // Append parsing error to warnings for those who are interested.
-			return nil, warnings, ErrParseOutput
+			return Run{}, warnings, ErrParseOutput
 		}
 
 		// Critical scan errors are reflected in the XML.
 		if result != nil && len(result.Stats.Finished.ErrorMsg) > 0 {
 			switch {
 			case strings.Contains(result.Stats.Finished.ErrorMsg, "Error resolving name"):
-				return result, warnings, ErrResolveName
+				return *result, warnings, ErrResolveName
 			// TODO: Add cases for other known errors we might want to guard.
 			default:
-				return result, warnings, fmt.Errorf(result.Stats.Finished.ErrorMsg)
+				return *result, warnings, fmt.Errorf(result.Stats.Finished.ErrorMsg)
 			}
 		}
 
@@ -136,13 +136,13 @@ func (s *Scanner) Run() (result *Run, warnings []string, err error) {
 		}
 
 		// Return result, optional warnings but no error
-		return result, warnings, nil
+		return *result, warnings, nil
 	}
 }
 
 // RunWithProgress runs nmap synchronously and returns the result of the scan.
 // It needs a channel to constantly stream the progress.
-func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, warnings []string, err error) {
+func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result Run, warnings []string, err error) {
 	var stdout, stderr bytes.Buffer
 
 	// Enable XML output
@@ -152,17 +152,19 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 	s.args = append(s.args, "-")
 
 	// Enable progress output every second
-	s.args = append(s.args, "--stats-every", "1s")
+	s.args = append(s.args, "--stats-every", "5s")
 
 	// Prepare nmap process
 	cmd := exec.Command(s.binaryPath, s.args...)
 	cmd.Stderr = &stderr
 	cmd.Stdout = &stdout
 
+	fmt.Println(cmd.Args)
+
 	// Run nmap process
 	err = cmd.Start()
 	if err != nil {
-		return nil, warnings, err
+		return Run{}, warnings, err
 	}
 
 	// Make a goroutine to notify the select when the scan is done.
@@ -172,7 +174,7 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 		done <- cmd.Wait()
 	}()
 
-	// Make goroutine to check the progress every second
+	// Make goroutine to check the progress every 5 seconds
 	// Listening for channel doneProgress
 	go func() {
 		type progress struct {
@@ -185,9 +187,8 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 				close(liveProgress)
 				return
 			default:
-				time.Sleep(time.Second)
+				time.Sleep(time.Second*5)
 				_ = xml.Unmarshal(stdout.Bytes(), p)
-				//result, _ := Parse(stdout.Bytes())
 				if len(p.TaskProgress) > 0 {
 					liveProgress <- p.TaskProgress[len(p.TaskProgress)-1].Percent
 				}
@@ -199,11 +200,13 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 	select {
 	case <-s.ctx.Done():
 
+		close(doneProgress)
+
 		// Context was done before the scan was finished.
 		// The process is killed and a timeout error is returned.
 		_ = cmd.Process.Kill()
 
-		return nil, warnings, ErrScanTimeout
+		return Run{}, warnings, ErrScanTimeout
 	case <-done:
 
 		// Trigger progress function exit
@@ -219,7 +222,7 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 		for _, warning := range warnings {
 			switch {
 			case strings.Contains(warning, "Malloc Failed!"):
-				return nil, warnings, ErrMallocFailed
+				return Run{}, warnings, ErrMallocFailed
 			// TODO: Add cases for other known errors we might want to guard.
 			default:
 			}
@@ -230,17 +233,17 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 		result, err := Parse(stdout.Bytes())
 		if err != nil {
 			warnings = append(warnings, err.Error()) // Append parsing error to warnings for those who are interested.
-			return nil, warnings, ErrParseOutput
+			return Run{}, warnings, ErrParseOutput
 		}
 
 		// Critical scan errors are reflected in the XML.
 		if result != nil && len(result.Stats.Finished.ErrorMsg) > 0 {
 			switch {
 			case strings.Contains(result.Stats.Finished.ErrorMsg, "Error resolving name"):
-				return result, warnings, ErrResolveName
+				return *result, warnings, ErrResolveName
 			// TODO: Add cases for other known errors we might want to guard.
 			default:
-				return result, warnings, fmt.Errorf(result.Stats.Finished.ErrorMsg)
+				return *result, warnings, fmt.Errorf(result.Stats.Finished.ErrorMsg)
 			}
 		}
 
@@ -253,7 +256,7 @@ func (s *Scanner) RunWithProgress(liveProgress chan<- float32) (result *Run, war
 		}
 
 		// Return result, optional warnings but no error
-		return result, warnings, nil
+		return *result, warnings, nil
 	}
 }
 
